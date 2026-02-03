@@ -5,16 +5,15 @@ import os
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.types import BotCommand, BotCommandScopeAllGroupChats, BotCommandScopeAllPrivateChats
+from aiogram.types import BotCommand, BotCommandScopeAllGroupChats
+from aiogram.exceptions import TelegramBadRequest
 
 # --- SOZLAMALAR ---
-# Tokenni GitHub Secrets'dan xavfsiz olish (Siz yozgan token bilan ishlaydi)
 TOKEN = os.getenv("BOT_TOKEN") 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# --- MA'LUMOTLAR BAZASI (SQLite) ---
-# Bot restart bo'lganda ballar saqlanib qolishi uchun
+# --- MA'LUMOTLAR BAZASI ---
 def init_db():
     conn = sqlite3.connect('crocodile_game.db')
     cursor = conn.cursor()
@@ -68,8 +67,11 @@ LANG_DATA = {
 
 # --- FUNKSIYALAR ---
 async def set_main_menu(bot: Bot):
-    await bot.set_my_commands([BotCommand(command="start_game", description="🎮 Start"), BotCommand(command="top", description="🏆 Top")], scope=BotCommandScopeAllGroupChats())
-    await bot.set_my_commands([BotCommand(command="start", description="👋 Salom")], scope=BotCommandScopeAllPrivateChats())
+    # Faqat guruhlar uchun komandalar
+    await bot.set_my_commands([
+        BotCommand(command="start_game", description="🎮 O'yinni boshlash"), 
+        BotCommand(command="top", description="🏆 Reyting")
+    ], scope=BotCommandScopeAllGroupChats())
 
 async def start_new_round(chat_id):
     lang = load_lang(chat_id)
@@ -82,6 +84,9 @@ async def start_new_round(chat_id):
 
 @dp.message(Command("start_game"))
 async def choose_lang(message: types.Message):
+    if message.chat.type == "private":
+        return await message.answer("❌ Bu o'yin faqat guruhlarda ishlaydi! Botni guruhga qo'shing.")
+    
     builder = InlineKeyboardBuilder()
     for lang in LANG_DATA.keys():
         builder.button(text=lang, callback_data=f"lang_{lang}")
@@ -99,46 +104,25 @@ async def set_lang(callback: types.CallbackQuery):
 async def handle_leader(callback: types.CallbackQuery):
     chat_id = callback.message.chat.id
     lang = load_lang(chat_id)
+    
     if callback.data.startswith("change_") and callback.from_user.id != game_state[chat_id]["leader"]:
-        return await callback.answer("❌", show_alert=True)
+        return await callback.answer("❌ Faqat boshlovchi o'zgartira oladi!", show_alert=True)
+    
     word = random.choice(LANG_DATA[lang]["words"]).lower()
     game_state[chat_id].update({"word": word, "leader": callback.from_user.id})
-    await callback.answer(f"🤫 {word.upper()}", show_alert=True)
+    
+    await callback.answer(f"🤫 SO'Z: {word.upper()}", show_alert=True)
+    
     builder = InlineKeyboardBuilder()
     builder.button(text=LANG_DATA[lang]["change"], callback_data=f"change_{chat_id}")
-    await callback.message.edit_text(f"🎮 {callback.from_user.full_name} ...", reply_markup=builder.as_markup())
+    
+    # Xatolikni oldini olish uchun try-except
+    try:
+        await callback.message.edit_text(
+            f"🎮 Boshlovchi: {callback.from_user.full_name}\nSizning vazifangiz so'zni tushuntirish!", 
+            reply_markup=builder.as_markup()
+        )
+    except TelegramBadRequest:
+        pass # Agar xabar o'zgarmasa, xatoni o'tkazib yuboramiz
 
-@dp.message(Command("top"))
-async def show_top(message: types.Message):
-    top_data = get_top_scores()
-    if not top_data: return await message.answer("🏆 N/A")
-    lang = load_lang(message.chat.id)
-    text = f"{LANG_DATA[lang]['top_t']}\n\n"
-    for i, (name, score) in enumerate(top_data, 1):
-        text += f"{i}. {name} — {score}\n"
-    await message.answer(text)
-
-@dp.message(F.text)
-async def check_ans(message: types.Message):
-    chat_id = message.chat.id
-    if chat_id not in game_state or not game_state[chat_id].get("leader"): return
-    lang = load_lang(chat_id)
-    if message.from_user.id == game_state[chat_id]["leader"]:
-        if game_state[chat_id]["word"] in message.text.lower(): await message.delete()
-        return
-    if message.text.lower().strip() == game_state[chat_id]["word"]:
-        update_score(message.from_user.id, message.from_user.full_name)
-        try: await bot.delete_message(chat_id, game_state[chat_id]["msg_id"])
-        except: pass
-        await message.reply(LANG_DATA[lang]["win"].format(name=message.from_user.full_name, word=game_state[chat_id]["word"].upper()))
-        await asyncio.sleep(2)
-        await start_new_round(chat_id)
-
-async def main():
-    init_db()
-    await set_main_menu(bot)
-    print("Bot ishga tushdi...")
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+@dp
